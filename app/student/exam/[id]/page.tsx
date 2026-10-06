@@ -22,6 +22,12 @@ type Attempt = {
   answers: Record<string, number> | null;
 };
 
+type OpenAttempt = {
+  id: string;
+  started_at: string | null;
+  submitted_at: string | null;
+};
+
 export default function ExamPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -82,7 +88,11 @@ export default function ExamPage() {
 
       if (e.error) {
         console.error("EXAM ERROR:", e.error);
-        setError(`خطأ في تحميل الامتحان: ${e.error.message}`);
+
+        setError(
+          `خطأ في تحميل الامتحان: ${e.error.message}`
+        );
+
         setLoading(false);
         return;
       }
@@ -105,11 +115,17 @@ export default function ExamPage() {
           "id,question_text,question_image_url,options,correct_option,order_no"
         )
         .eq("exam_id", id)
-        .order("order_no", { ascending: true });
+        .order("order_no", {
+          ascending: true,
+        });
 
       if (q.error) {
         console.error("QUESTIONS ERROR:", q.error);
-        setError(`خطأ في تحميل الأسئلة: ${q.error.message}`);
+
+        setError(
+          `خطأ في تحميل الأسئلة: ${q.error.message}`
+        );
+
         setLoading(false);
         return;
       }
@@ -140,12 +156,16 @@ export default function ExamPage() {
       }
 
       if (submittedAttempt.data) {
-        const attempt = submittedAttempt.data as Attempt;
+        const attempt =
+          submittedAttempt.data as Attempt;
 
         setSubmitted(true);
+
         setScore(attempt.score ?? 0);
+
         setTotal(
-          attempt.total_questions ?? loadedQuestions.length
+          attempt.total_questions ??
+            loadedQuestions.length
         );
 
         // استرجاع إجابات الطالب
@@ -161,31 +181,46 @@ export default function ExamPage() {
       // 4. البحث عن محاولة بدأت بالفعل
       // ------------------------------------------------
 
-      let attempt = await supabase
+      let attemptData: OpenAttempt | null = null;
+
+      const existingAttempt = await supabase
         .from("exam_attempts")
-        .select("id,started_at,submitted_at")
+        .select(
+          "id,started_at,submitted_at"
+        )
         .eq("exam_id", id)
         .eq("student_id", s.id)
         .is("submitted_at", null)
         .maybeSingle();
 
-      if (attempt.error) {
-        console.error("GET ATTEMPT ERROR:", attempt.error);
+      if (existingAttempt.error) {
+        console.error(
+          "GET ATTEMPT ERROR:",
+          existingAttempt.error
+        );
+      }
+
+      if (existingAttempt.data) {
+        attemptData =
+          existingAttempt.data as OpenAttempt;
       }
 
       // ------------------------------------------------
       // 5. لو مفيش محاولة، ننشئ محاولة جديدة
       // ------------------------------------------------
 
-      if (!attempt.data) {
+      if (!attemptData) {
         const newAttempt = await supabase
           .from("exam_attempts")
           .insert({
             exam_id: id,
             student_id: s.id,
-            started_at: new Date().toISOString(),
+            started_at:
+              new Date().toISOString(),
           })
-          .select("id,started_at,submitted_at")
+          .select(
+            "id,started_at,submitted_at"
+          )
           .single();
 
         if (newAttempt.error) {
@@ -194,37 +229,105 @@ export default function ExamPage() {
             newAttempt.error
           );
 
-          setError(
-            `تعذر بدء الامتحان: ${newAttempt.error.message}`
-          );
+          // لو حصلت محاولة إنشاء مكررة
+          // بسبب طلبين في نفس الوقت، نحاول
+          // تحميل المحاولة الموجودة بدل إظهار خطأ.
+          if (
+            newAttempt.error.code === "23505" ||
+            newAttempt.error.message.includes(
+              "exam_attempts_exam_id_student_id_key"
+            )
+          ) {
+            const retryAttempt =
+              await supabase
+                .from("exam_attempts")
+                .select(
+                  "id,started_at,submitted_at,score,total_questions,answers"
+                )
+                .eq("exam_id", id)
+                .eq("student_id", s.id)
+                .maybeSingle();
 
-          setLoading(false);
-          return;
+            if (
+              retryAttempt.data
+            ) {
+              const retryData =
+                retryAttempt.data as Attempt;
+
+              // لو المحاولة اتسلمت بالفعل
+              if (
+                retryData.submitted_at
+              ) {
+                setSubmitted(true);
+
+                setScore(
+                  retryData.score ?? 0
+                );
+
+                setTotal(
+                  retryData.total_questions ??
+                    loadedQuestions.length
+                );
+
+                if (
+                  retryData.answers
+                ) {
+                  setAnswers(
+                    retryData.answers
+                  );
+                }
+
+                setLoading(false);
+                return;
+              }
+
+              attemptData = {
+                id: retryData.id,
+                started_at:
+                  retryData.started_at,
+                submitted_at:
+                  retryData.submitted_at,
+              };
+            }
+          }
+
+          if (!attemptData) {
+            setError(
+              `تعذر بدء الامتحان: ${newAttempt.error.message}`
+            );
+
+            setLoading(false);
+            return;
+          }
+        } else if (newAttempt.data) {
+          attemptData =
+            newAttempt.data as OpenAttempt;
         }
-
-        attempt = {
-          data: newAttempt.data,
-          error: null,
-        };
       }
 
       // ------------------------------------------------
       // 6. حساب الوقت المتبقي
       // ------------------------------------------------
 
-      if (attempt.data?.started_at) {
+      if (attemptData?.started_at) {
         const durationMinutes =
-          Number(e.data.duration_minutes) || 30;
+          Number(e.data.duration_minutes) ||
+          30;
 
         const startedAt =
-          new Date(attempt.data.started_at).getTime();
+          new Date(
+            attemptData.started_at
+          ).getTime();
 
         const endTime =
-          startedAt + durationMinutes * 60 * 1000;
+          startedAt +
+          durationMinutes * 60 * 1000;
 
         const remaining = Math.max(
           0,
-          Math.floor((endTime - Date.now()) / 1000)
+          Math.floor(
+            (endTime - Date.now()) / 1000
+          )
         );
 
         setTimeLeft(remaining);
@@ -259,7 +362,9 @@ export default function ExamPage() {
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
-        if (prev === null) return null;
+        if (prev === null) {
+          return null;
+        }
 
         if (prev <= 1) {
           clearInterval(timer);
@@ -271,7 +376,11 @@ export default function ExamPage() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [timeLeft, submitted, loading]);
+  }, [
+    timeLeft,
+    submitted,
+    loading,
+  ]);
 
   // ------------------------------------------------
   // اختيار الإجابة
@@ -281,7 +390,9 @@ export default function ExamPage() {
     questionId: string,
     optionIndex: number
   ) {
-    if (submitted) return;
+    if (submitted) {
+      return;
+    }
 
     setAnswers((prev) => ({
       ...prev,
@@ -293,24 +404,31 @@ export default function ExamPage() {
   // تنسيق الوقت
   // ------------------------------------------------
 
-  function formatTime(seconds: number | null) {
+  function formatTime(
+    seconds: number | null
+  ) {
     if (seconds === null) {
       return "--:--";
     }
 
-    const minutes = Math.floor(seconds / 60);
+    const minutes =
+      Math.floor(seconds / 60);
+
     const secs = seconds % 60;
 
-    return `${String(minutes).padStart(2, "0")}:${String(
-      secs
-    ).padStart(2, "0")}`;
+    return `${String(minutes).padStart(
+      2,
+      "0"
+    )}:${String(secs).padStart(2, "0")}`;
   }
 
   // ------------------------------------------------
   // تسليم الامتحان
   // ------------------------------------------------
 
-  async function submitExam(autoSubmit = false) {
+  async function submitExam(
+    autoSubmit = false
+  ) {
     if (
       !supabase ||
       !student ||
@@ -321,7 +439,9 @@ export default function ExamPage() {
     }
 
     if (!qs.length) {
-      setError("لا توجد أسئلة في هذا الامتحان.");
+      setError(
+        "لا توجد أسئلة في هذا الامتحان."
+      );
       return;
     }
 
@@ -330,20 +450,25 @@ export default function ExamPage() {
     // ------------------------------------------------
 
     if (!autoSubmit) {
-      const unanswered = qs.filter(
-        (q) => answers[q.id] === undefined
-      );
+      const unanswered =
+        qs.filter(
+          (q) =>
+            answers[q.id] ===
+            undefined
+        );
 
       if (unanswered.length > 0) {
         setError(
           `يجب الإجابة على جميع الأسئلة. متبقي ${unanswered.length} سؤال.`
         );
+
         return;
       }
 
-      const confirmed = window.confirm(
-        "هل أنت متأكد من تسليم الامتحان؟\n\nبعد التسليم لن تستطيع دخول الامتحان مرة أخرى."
-      );
+      const confirmed =
+        window.confirm(
+          "هل أنت متأكد من تسليم الامتحان؟\n\nبعد التسليم لن تستطيع دخول الامتحان مرة أخرى."
+        );
 
       if (!confirmed) {
         return;
@@ -363,7 +488,10 @@ export default function ExamPage() {
         answers[q.id] ?? null,
     }));
 
-    console.log("SUBMIT PAYLOAD:", payload);
+    console.log(
+      "SUBMIT PAYLOAD:",
+      payload
+    );
 
     // ------------------------------------------------
     // إرسال الامتحان
@@ -378,10 +506,16 @@ export default function ExamPage() {
       }
     );
 
-    console.log("SUBMIT RESPONSE:", r);
+    console.log(
+      "SUBMIT RESPONSE:",
+      r
+    );
 
     if (r.error) {
-      console.error("SUBMIT ERROR:", r.error);
+      console.error(
+        "SUBMIT ERROR:",
+        r.error
+      );
 
       if (
         r.error.message &&
@@ -389,16 +523,49 @@ export default function ExamPage() {
           "ALREADY_ATTEMPTED"
         )
       ) {
-        setSubmitted(true);
+        // نحاول تحميل النتيجة المحفوظة
+        const existing =
+          await supabase
+            .from("exam_attempts")
+            .select(
+              "id,started_at,submitted_at,score,total_questions,answers"
+            )
+            .eq("exam_id", id)
+            .eq(
+              "student_id",
+              student.id
+            )
+            .maybeSingle();
 
-        setError(
-          "لقد قمت بتسليم هذا الامتحان بالفعل."
-        );
-      } else {
-        setError(
-          `خطأ: ${r.error.message}`
-        );
+        if (existing.data) {
+          const attempt =
+            existing.data as Attempt;
+
+          setScore(
+            attempt.score ?? 0
+          );
+
+          setTotal(
+            attempt.total_questions ??
+              qs.length
+          );
+
+          if (attempt.answers) {
+            setAnswers(
+              attempt.answers
+            );
+          }
+        }
+
+        setSubmitted(true);
+        setTimeLeft(0);
+        setBusy(false);
+        return;
       }
+
+      setError(
+        `خطأ: ${r.error.message}`
+      );
 
       setBusy(false);
       return;
@@ -425,13 +592,17 @@ export default function ExamPage() {
     // حفظ إجابات الطالب في المحاولة
     // ------------------------------------------------
 
-    const updateAttempt = await supabase
-      .from("exam_attempts")
-      .update({
-        answers: answers,
-      })
-      .eq("exam_id", id)
-      .eq("student_id", student.id);
+    const updateAttempt =
+      await supabase
+        .from("exam_attempts")
+        .update({
+          answers: answers,
+        })
+        .eq("exam_id", id)
+        .eq(
+          "student_id",
+          student.id
+        );
 
     if (updateAttempt.error) {
       console.error(
@@ -457,7 +628,9 @@ export default function ExamPage() {
     return (
       <main className="auth">
         <div className="auth-box">
-          <h2>جاري تحميل الامتحان...</h2>
+          <h2>
+            جاري تحميل الامتحان...
+          </h2>
         </div>
       </main>
     );
@@ -476,7 +649,9 @@ export default function ExamPage() {
           <button
             className="btn btn-primary"
             onClick={() =>
-              router.push("/student")
+              router.push(
+                "/student"
+              )
             }
             style={{
               marginTop: 15,
@@ -497,7 +672,6 @@ export default function ExamPage() {
     return (
       <main className="container topspace">
         <div className="card">
-
           <div
             style={{
               textAlign: "center",
@@ -525,7 +699,8 @@ export default function ExamPage() {
                 marginTop: 10,
               }}
             >
-              يمكنك الآن مراجعة إجاباتك.
+              يمكنك الآن مراجعة
+              إجاباتك.
             </p>
 
             {score !== null &&
@@ -535,14 +710,17 @@ export default function ExamPage() {
                     marginTop: 20,
                     padding: 20,
                     borderRadius: 15,
-                    background: "#ffffff",
-                    border: "1px solid #ddd",
+                    background:
+                      "#ffffff",
+                    border:
+                      "1px solid #ddd",
                   }}
                 >
                   <div
                     style={{
                       fontSize: 17,
-                      fontWeight: "bold",
+                      fontWeight:
+                        "bold",
                     }}
                   >
                     نتيجتك
@@ -551,7 +729,8 @@ export default function ExamPage() {
                   <div
                     style={{
                       fontSize: 38,
-                      fontWeight: "bold",
+                      fontWeight:
+                        "bold",
                       marginTop: 8,
                     }}
                   >
@@ -574,7 +753,8 @@ export default function ExamPage() {
               answers[q.id];
 
             const hasAnswer =
-              studentAnswer !== undefined &&
+              studentAnswer !==
+                undefined &&
               studentAnswer !== null;
 
             const isCorrect =
@@ -590,14 +770,12 @@ export default function ExamPage() {
                   marginBottom: 25,
                   padding: 20,
                   borderRadius: 15,
-                  border:
-                    isCorrect
-                      ? "2px solid #2e9d50"
-                      : "2px solid #d33",
-                  background:
-                    isCorrect
-                      ? "#f2fff5"
-                      : "#fff5f5",
+                  border: isCorrect
+                    ? "2px solid #2e9d50"
+                    : "2px solid #d33",
+                  background: isCorrect
+                    ? "#f2fff5"
+                    : "#fff5f5",
                 }}
               >
                 <h3>
@@ -613,7 +791,8 @@ export default function ExamPage() {
                     }
                     alt="صورة السؤال"
                     style={{
-                      maxWidth: "100%",
+                      maxWidth:
+                        "100%",
                       borderRadius: 12,
                       margin:
                         "10px 0",
@@ -627,15 +806,15 @@ export default function ExamPage() {
                     marginBottom: 15,
                     padding: 12,
                     borderRadius: 10,
-                    fontWeight: "bold",
+                    fontWeight:
+                      "bold",
                     background:
                       isCorrect
                         ? "#dcfce7"
                         : "#fee2e2",
-                    color:
-                      isCorrect
-                        ? "#166534"
-                        : "#991b1b",
+                    color: isCorrect
+                      ? "#166534"
+                      : "#991b1b",
                   }}
                 >
                   {isCorrect
@@ -648,10 +827,12 @@ export default function ExamPage() {
                     (op, j) => {
                       const isStudentAnswer =
                         hasAnswer &&
-                        studentAnswer === j;
+                        studentAnswer ===
+                          j;
 
                       const isCorrectAnswer =
-                        q.correct_option === j;
+                        q.correct_option ===
+                        j;
 
                       let background =
                         "#ffffff";
@@ -692,8 +873,10 @@ export default function ExamPage() {
                           key={j}
                           style={{
                             padding: 12,
-                            marginBottom: 8,
-                            borderRadius: 10,
+                            marginBottom:
+                              8,
+                            borderRadius:
+                              10,
                             background,
                             border,
                             color:
@@ -710,7 +893,8 @@ export default function ExamPage() {
                           {isCorrectAnswer && (
                             <span
                               style={{
-                                marginRight: 8,
+                                marginRight:
+                                  8,
                               }}
                             >
                               ✓ الإجابة
@@ -722,7 +906,8 @@ export default function ExamPage() {
                             !isCorrectAnswer && (
                               <span
                                 style={{
-                                  marginRight: 8,
+                                  marginRight:
+                                    8,
                                 }}
                               >
                                 ✗ إجابتك
@@ -739,10 +924,12 @@ export default function ExamPage() {
                     style={{
                       marginTop: 10,
                       color: "#a11",
-                      fontWeight: "bold",
+                      fontWeight:
+                        "bold",
                     }}
                   >
-                    لم تُجب عن هذا السؤال.
+                    لم تُجب عن هذا
+                    السؤال.
                   </div>
                 )}
               </div>
@@ -755,7 +942,9 @@ export default function ExamPage() {
               marginTop: 10,
             }}
             onClick={() =>
-              router.push("/student")
+              router.push(
+                "/student"
+              )
             }
           >
             العودة للصفحة الرئيسية
@@ -772,7 +961,6 @@ export default function ExamPage() {
   return (
     <main className="container topspace">
       <div className="card">
-
         {/* العداد */}
 
         <div
@@ -827,10 +1015,12 @@ export default function ExamPage() {
                 style={{
                   color: "#d00",
                   marginTop: 5,
-                  fontWeight: "bold",
+                  fontWeight:
+                    "bold",
                 }}
               >
-                ⚠️ اقترب الوقت من الانتهاء
+                ⚠️ اقترب الوقت من
+                الانتهاء
               </div>
             )}
         </div>
@@ -864,7 +1054,8 @@ export default function ExamPage() {
               textAlign: "center",
             }}
           >
-            لا توجد أسئلة في هذا الامتحان حاليًا.
+            لا توجد أسئلة في هذا
+            الامتحان حاليًا.
           </div>
         ) : (
           qs.map((q, i) => (
@@ -909,17 +1100,21 @@ export default function ExamPage() {
                       className="exam-option"
                       key={j}
                       style={{
-                        display: "block",
-                        cursor: "pointer",
-                        marginBottom: 10,
+                        display:
+                          "block",
+                        cursor:
+                          "pointer",
+                        marginBottom:
+                          10,
                       }}
                     >
                       <input
                         type="radio"
                         name={q.id}
                         checked={
-                          answers[q.id] ===
-                          j
+                          answers[
+                            q.id
+                          ] === j
                         }
                         onChange={() =>
                           chooseAnswer(
